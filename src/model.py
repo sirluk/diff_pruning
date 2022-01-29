@@ -15,9 +15,9 @@ from transformers import (
 from typing import Union, Callable, List, Dict, Tuple, Optional
 from enum import Enum, auto
 
-from training_logger import TrainLogger
-from diff_param import DiffWeight, DiffWeightFixmask
-from utils import dict_to_device
+from src.training_logger import TrainLogger
+from src.diff_param import DiffWeight, DiffWeightFixmask
+from src.utils import dict_to_device
 
 
 class ModelState(Enum):
