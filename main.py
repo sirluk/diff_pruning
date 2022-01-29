@@ -19,7 +19,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 def get_ds(tokenizer) -> TensorDataset:
     
     ds = load_dataset("glue", "sst2", cache_dir="cache")
-    ds = ds.map(
+    return ds.map(
         lambda x: tokenizer(x["sentence"], padding="max_length", max_length=128, truncation=True),
         batched=True,
         load_from_cache_file=False,
@@ -31,10 +31,19 @@ def get_ds_part(ds, part) -> TensorDataset:
     _ds = ds[part]
     return TensorDataset(
         torch.tensor(_ds["input_ids"], dtype=torch.long),
-        torch.tensor(_ds["attention_mask"], dtype=torch.long),
         torch.tensor(_ds["token_type_ids"], dtype=torch.long),
+        torch.tensor(_ds["attention_mask"], dtype=torch.long),
         torch.tensor(_ds["label"], dtype=torch.float)
     )
+
+def batch_fn(batch):
+    input_ids, token_type_ids, attention_masks, labels = [torch.stack(l) for l in zip(*batch)]
+    x = {
+        "input_ids": input_ids,
+        "token_type_ids": token_type_ids,
+        "attention_mask": attention_masks
+    }
+    return x, labels
 
 
 def main(args):    
@@ -46,20 +55,25 @@ def main(args):
     ds = get_ds(tokenizer)
     
     pred_fn = lambda x: (torch.sigmoid(x) > .5).long()
-    loss_fn = torch.nn.BCEWithLogitsLoss()
+    loss_fn = lambda x, y: torch.nn.BCEWithLogitsLoss()(x.flatten(), y)
     metrics = {
-        "acc": lambda x, y: accuracy(pred_fn(x), y),
-        "balanced_acc": lambda x, y: accuracy(pred_fn(x), y, balanced=True)
+        "acc": lambda x, y: accuracy(pred_fn(x), y)
     }
    
     ds_train = get_ds_part(ds, "train")
-    train_loader = DataLoader(ds_train, sampler=RandomSampler(ds_train), batch_size=args.batch_size)
+    train_loader = DataLoader(ds_train, sampler=RandomSampler(ds_train), batch_size=args.batch_size, collate_fn=batch_fn)
     ds_eval = get_ds_part(ds, "validation")
-    eval_loader = DataLoader(ds_eval, sampler=SequentialSampler(ds_eval), batch_size=args.batch_size)
+    eval_loader = DataLoader(ds_eval, sampler=SequentialSampler(ds_eval), batch_size=args.batch_size, collate_fn=batch_fn)
 
+    logger_name = "_".join([
+        "diff_pruning",
+        args.model_name.split('/')[-1],
+        str(args.batch_size),
+        str(args.learning_rate)
+    ])
     train_logger = TrainLogger(
-        log_dir = Path(args.output_dir) / "logs",
-        logger_name = "diff_pruning_logger",
+        log_dir = args.log_dir,
+        logger_name = logger_name,
         logging_step = args.logging_step
     )
 

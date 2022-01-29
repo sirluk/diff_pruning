@@ -1,6 +1,6 @@
 train_config:
-    model_name: "google/bert_uncased_L-2_H-128_A-2"
-    batch_size: 64
+    model_name: "google/bert_uncased_L-2_H-128_A-2" # "bert-base-cased"
+    batch_size: 32
     structured_diff_pruning: True
     alpha_init: 5
     concrete_lower: -1.5
@@ -18,3 +18,4 @@ train_config:
     fixmask_pct: 0.1
     logging_step: 5
     output_dir: "checkpoints"
+    log_dir: "logs"
