@@ -3,9 +3,8 @@ import math
 from tqdm import trange, tqdm
 from pathlib import Path
 import torch
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter
-from torch.nn.utils import parametrize, parameters_to_vector
+from torch.nn.utils import parametrize
 from torch.utils.data import DataLoader
 from transformers import (
     AdamW,
@@ -13,7 +12,7 @@ from transformers import (
     AutoModel
 )
 
-from typing import Union, Callable, List, Dict, Generator, Tuple, Optional
+from typing import Union, Callable, List, Dict, Tuple, Optional
 from enum import Enum, auto
 
 from training_logger import TrainLogger
@@ -22,8 +21,8 @@ from utils import dict_to_device
 
 
 class ModelState(Enum):
-    INIT = auto()
-    FINETUNE = auto()
+    FINETUNING = auto()
+    DIFFPRUNING = auto()
     FIXMASK = auto()
 
 
@@ -31,27 +30,27 @@ class DiffNetwork(torch.nn.Module):
     
     @property
     def device(self) -> torch.device:
-        return next(self.pre_trained.parameters()).device
+        return next(self.encoder.parameters()).device
     
     @property
     def model_type(self) -> str:
-        return self.pre_trained.config.model_type
+        return self.encoder.config.model_type
     
     @property
     def model_name(self) -> str:
-        return self.pre_trained.config._name_or_path
+        return self.encoder.config._name_or_path
     
     @property
     def total_layers(self) -> int:
         possible_keys = ["num_hidden_layers", "n_layer"]
         for k in possible_keys:
-            if k in self.pre_trained.config.__dict__:
-                return getattr(self.pre_trained.config, k) + 2 # +2 for embedding layer and last layer
+            if k in self.encoder.config.__dict__:
+                return getattr(self.encoder.config, k) + 2 # +2 for embedding layer and last layer
         raise Exception("number of layers of pre trained model could not be determined")
     
     @property
     def _parametrized(self) -> bool:
-        return (self._model_state == ModelState.FINETUNE or self._model_state == ModelState.FIXMASK)
+        return (self._model_state == ModelState.DIFFPRUNING or self._model_state == ModelState.FIXMASK)
         
     @staticmethod
     # TODO log ratio could be removed if only symmetric concrete distributions are possible
@@ -69,43 +68,26 @@ class DiffNetwork(torch.nn.Module):
             check_fn = lambda m: hasattr(m, "parametrizations")
         else:
             check_fn = lambda m: len(m._parameters)>0
-        return [(n,m) if return_names else m for n,m in self.pre_trained.named_modules() if check_fn(m)]
-    
-    
-    def get_layer_idx_from_module(self, n: str) -> int:
-        # get layer index based on parameter name
-        if self.model_type == "xlnet":
-            search_str_emb = "word_embedding"
-            search_str_hidden = "layer"
-        else:
-            search_str_emb = "embeddings"
-            search_str_hidden = "encoder.layer"
-        
-        if search_str_emb in n:
-            return 0
-        elif search_str_hidden in n:
-            return int(n.split(search_str_hidden + ".")[1].split(".")[0]) + 1
-        else:
-            return self.total_layers - 1
-       
+        return [(n,m) if return_names else m for n,m in self.encoder.named_modules() if check_fn(m)]
+          
     
     def __init__(self, num_labels, *args, **kwargs): 
         super().__init__()
         self.num_labels = num_labels
-        self.pre_trained = AutoModel.from_pretrained(*args, **kwargs)
+        self.encoder = AutoModel.from_pretrained(*args, **kwargs)
         
-        emb_dim = self.pre_trained.embeddings.word_embeddings.embedding_dim
+        emb_dim = self.encoder.embeddings.word_embeddings.embedding_dim
         
         self.classifier = torch.nn.Sequential(
             torch.nn.Dropout(.1),
             torch.nn.Linear(emb_dim, num_labels)
         )
         
-        self._model_state = ModelState.INIT
+        self._model_state = ModelState.FINETUNING
             
 
     def forward(self, **x) -> torch.Tensor: 
-        hidden = self.pre_trained(**x)[0][:,0]
+        hidden = self.encoder(**x)[0][:,0]
         return self.classifier(hidden)
 
     
@@ -158,8 +140,6 @@ class DiffNetwork(torch.nn.Module):
         
         self._init_sparsity_pen(sparsity_pen)
         
-        self.zero_grad()
-        
         train_str = "Epoch {}, model_state: {}{}"
         str_suffix = lambda result: ", " + ", ".join([f"validation {k}: {v}" for k,v in result.items()])
         result = {}
@@ -178,7 +158,8 @@ class DiffNetwork(torch.nn.Module):
                     train_steps_fixmask,
                     learning_rate,
                     weight_decay,
-                    adam_epsilon
+                    adam_epsilon,
+                    warmup_steps
                 )
             
             self._step(
@@ -198,8 +179,8 @@ class DiffNetwork(torch.nn.Module):
             
             logger.validation_loss(epoch, result)
             
-            # only save during fixmask training
-            if self._model_state == ModelState.FIXMASK:
+            # if num_epochs_fixmask > 0 only save during fixmask tuning
+            if ((num_epochs_fixmask > 0) and (self._model_state==ModelState.FIXMASK)) or (num_epochs_fixmask == 0):
                 if logger.is_best(result):
                     self._save_model_artefacts(
                         output_dir,
@@ -210,8 +191,8 @@ class DiffNetwork(torch.nn.Module):
                     )
                     
             # count non zero
-            n_p, n_p_zero = self._count_non_zero_params()            
-            logger.non_zero_params(epoch, n_p, n_p_zero)
+            n_p, n_p_zero, n_p_between = self._count_non_zero_params()            
+            logger.non_zero_params(epoch, n_p, n_p_zero, n_p_between)
         
         print("Final results after " + train_str.format(epoch, self._model_state, str_suffix(result)))
 
@@ -227,7 +208,7 @@ class DiffNetwork(torch.nn.Module):
 
         output_list = []
         val_iterator = tqdm(val_loader, desc="evaluating", leave=False, position=1)
-        for i, batch in enumerate(val_iterator):
+        for batch in val_iterator:
 
             inputs, labels = batch
             inputs = dict_to_device(inputs, self.device)
@@ -247,8 +228,85 @@ class DiffNetwork(torch.nn.Module):
         result["loss"] = eval_loss
 
         return result
+
+
+    def get_layer_idx_from_module(self, n: str) -> int:
+        # get layer index based on module name
+        if self.model_type == "xlnet":
+            search_str_emb = "word_embedding"
+            search_str_hidden = "layer"
+        else:
+            search_str_emb = "embeddings"
+            search_str_hidden = "encoder.layer"
+        
+        if search_str_emb in n:
+            return 0
+        elif search_str_hidden in n:
+            return int(n.split(search_str_hidden + ".")[1].split(".")[0]) + 1
+        else:
+            return self.total_layers - 1
+                                               
+                    
+    def save_checkpoint(
+        self,
+        filepath: Union[str, os.PathLike],
+        concrete_lower: Optional[float] = None,
+        concrete_upper: Optional[float] = None,
+        structured_diff_pruning: Optional[bool] = None
+    ) -> None:
+        info_dict = {
+            "model_name": self.model_name,
+            "num_labels": self.num_labels,
+            "model_state": self._model_state,
+            "encoder_state_dict": self.encoder.state_dict(),
+            "classifier_state_dict": self.classifier.state_dict()
+        }
+        if self._model_state == ModelState.DIFFPRUNING:
+            info_dict = {
+                **info_dict,
+                "concrete_lower": concrete_lower,
+                "concrete_upper": concrete_upper,
+                "structured_diff_pruning": structured_diff_pruning
+            } 
+        torch.save(info_dict, filepath)
+
+
+    @staticmethod
+    def load_checkpoint(filepath: Union[str, os.PathLike], remove_parametrizations: bool = False) -> torch.nn.Module:
+        info_dict = torch.load(filepath, map_location=torch.device('cpu'))
             
+        diff_network = DiffNetwork(
+            info_dict['num_labels'],
+            info_dict['model_name']
+        )
+        diff_network.classifier.load_state_dict(info_dict['classifier_state_dict'])
             
+        if info_dict["model_state"] == ModelState.DIFFPRUNING:
+            for base_module in diff_network.get_encoder_base_modules():
+                for n,p in list(base_module.named_parameters()):
+                    parametrize.register_parametrization(base_module, n, DiffWeight(p, 0,
+                        info_dict['concrete_lower'],
+                        info_dict['concrete_upper'],
+                        info_dict['structured_diff_pruning']
+                    ))
+        elif info_dict["model_state"] == ModelState.FIXMASK:
+            for base_module in diff_network.get_encoder_base_modules():
+                for n,p in list(base_module.named_parameters()):
+                    p.requires_grad = False
+                    parametrize.register_parametrization(base_module, n, DiffWeightFixmask(
+                        torch.clone(p), torch.clone(p.bool())
+                    ))          
+    
+        diff_network.encoder.load_state_dict(info_dict['encoder_state_dict'])
+        
+        if remove_parametrizations:
+            diff_network._remove_diff_parametrizations()
+        
+        diff_network.eval()
+        
+        return diff_network
+
+
     def _step(
         self,
         train_loader: DataLoader,
@@ -271,13 +329,13 @@ class DiffNetwork(torch.nn.Module):
             
             loss_no_pen = loss.item()
             
-            if self._model_state == ModelState.FINETUNE:
+            if self._model_state == ModelState.DIFFPRUNING:
                 l0_pen = 0.
                 for module_name, base_module in self.get_encoder_base_modules(return_names=True):
                     layer_idx = self.get_layer_idx_from_module(module_name)
                     sparsity_pen = self.sparsity_pen[layer_idx]
                     module_pen = 0.
-                    for n, par_list in list(base_module.parametrizations.items()):
+                    for par_list in list(base_module.parametrizations.values()):
                         for a in par_list[0].alpha_weights:
                             module_pen += self.get_l0_norm_term(a, log_ratio)
                     l0_pen += (module_pen * sparsity_pen)
@@ -303,28 +361,6 @@ class DiffNetwork(torch.nn.Module):
             epoch_iterator.set_description(epoch_str.format(step, loss.item(), loss_no_pen), refresh=True)
             
             self.global_step += 1
-                                    
-                    
-    def _save_model_artefacts(
-        self,
-        output_dir: Union[str, os.PathLike],
-        filename: str,
-        eval_loss: float,
-        epoch: int,
-        num_epochs_finetune: int
-    ) -> None:
-        output_dir = Path(output_dir)
-        info_dict = {
-            "epoch": epoch,
-            "epochs_finetune": num_epochs_finetune,
-            "epochs_fixmask": epoch - num_epochs_finetune + 1,
-            "global_step": self.global_step,
-            "model_state": self._model_state,
-            "eval_loss": eval_loss,
-            "encoder_state_dict": self.pre_trained.state_dict(),
-            "clf_state_dict": self.classifier.state_dict()
-        }
-        torch.save(info_dict, Path(output_dir) / filename)
         
                 
     def _init_optimizer_and_schedule(
@@ -336,19 +372,18 @@ class DiffNetwork(torch.nn.Module):
         num_warmup_steps: int = 0,
         learning_rate_alpha: Optional[float] = None
     ) -> None:
-        assert self._parametrized, "Optimizer can only be intialized with parametrized diff network."
         
-        if self._model_state == ModelState.FINETUNE:
+        if self._model_state == ModelState.DIFFPRUNING:
             optimizer_params = [
                 {
                     # diff params (last dense layer is in no_decay list)
                     # TODO needs to be changed when original weight is set to fixed pre trained
-                    "params": [p for n,p in self.pre_trained.named_parameters() if n[-8:]=="finetune"],
+                    "params": [p for n,p in self.encoder.named_parameters() if n[-8:]=="finetune"],
                     "weight_decay": weight_decay,
                     "lr": learning_rate
                 },
                 {
-                "params": [p for n,p in self.pre_trained.named_parameters() if n[-5:]=="alpha" or n[-11:]=="alpha_group"],
+                "params": [p for n,p in self.encoder.named_parameters() if n[-5:]=="alpha" or n[-11:]=="alpha_group"],
                 "lr": learning_rate_alpha
                 },
                 {
@@ -356,7 +391,7 @@ class DiffNetwork(torch.nn.Module):
                     "lr": learning_rate
                 },
             ]
-        elif self._model_state == ModelState.FIXMASK:
+        else:
             optimizer_params = [{
                 "params": self.parameters(),
                 "lr": learning_rate
@@ -382,7 +417,7 @@ class DiffNetwork(torch.nn.Module):
         for base_module in self.get_encoder_base_modules():
             for n,p in list(base_module.named_parameters()):
                 parametrize.register_parametrization(base_module, n, DiffWeight(p, *args))   
-        self._model_state = ModelState.FINETUNE
+        self._model_state = ModelState.DIFFPRUNING
         
       
     @torch.no_grad()
@@ -411,30 +446,31 @@ class DiffNetwork(torch.nn.Module):
     
     @torch.no_grad() 
     def _count_non_zero_params(self) -> Tuple[int, int]:
+        assert self._parametrized, "Function only implemented for diff pruning"
         n_p = 0
         n_p_zero = 0
-        base_modules = self.get_encoder_base_modules()
-        if self._parametrized:
-            for base_module in base_modules:
-                for n, par_list in list(base_module.parametrizations.items()):
-                    if isinstance(par_list[0], DiffWeightFixmask):
-                        n_p += par_list[0].mask.numel()
-                        n_p_zero += ~par_list[0].mask.sum()
-                    else:
-                        par_list[0].set_mode(train=False)
-                        z = par_list[0].z.detach()
-                        n_p += z.numel()
-                        n_p_zero += torch.isclose(z.float().cpu(), torch.tensor([0.]), atol=1e-10).sum()
-                        par_list[0].set_mode(train=True)
-        else:
-            for p in self.pre_trained.parameters():
-                n_p += p.numel()
-                n_p_zero += torch.isclose(p.float().cpu(), torch.tensor([0.])).sum()                                    
-        return n_p, n_p_zero
+        n_p_one = 0
+        for base_module in self.get_encoder_base_modules():
+            for par_list in list(base_module.parametrizations.values()):
+                if isinstance(par_list[0], DiffWeightFixmask):
+                    n_p_ = par_list[0].mask.numel()
+                    n_p_zero_ = ~par_list[0].mask.sum()
+                    n_p += n_p_
+                    n_p_zero += n_p_zero_
+                    n_p_one += (n_p_ - n_p_zero_)
+                else:
+                    par_list[0].set_mode(train=False)
+                    z = par_list[0].z.detach()
+                    n_p += z.numel()
+                    n_p_zero += (z == 0.).sum()
+                    n_p_one += (z == 1.).sum()
+                    par_list[0].set_mode(train=True)
+        n_p_between = n_p - (n_p_zero + n_p_one)
+        return n_p, n_p_zero, n_p_between
 
     
     def _remove_diff_parametrizations(self) -> None:
         for parametrized_module in self.get_encoder_base_modules():
             for n in list(parametrized_module.parametrizations):
                 parametrize.remove_parametrizations(parametrized_module, n)
-        self._model_state = ModelState.INIT
+        self._model_state = ModelState.FINETUNING

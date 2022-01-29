@@ -5,13 +5,12 @@ import argparse
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, RandomSampler, TensorDataset, SequentialSampler
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoTokenizer
 from datasets import load_dataset
 
-from data_handler import get_data_loader, read_label_file 
-from model import DiffNetwork
-from training_logger import TrainLogger
-from metrics import accuracy
+from src.model import DiffNetwork
+from src.training_logger import TrainLogger
+from src.metrics import accuracy
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -34,7 +33,7 @@ def get_ds_part(ds, part) -> TensorDataset:
         torch.tensor(_ds["input_ids"], dtype=torch.long),
         torch.tensor(_ds["attention_mask"], dtype=torch.long),
         torch.tensor(_ds["token_type_ids"], dtype=torch.long),
-        torch.tensor(_ds["label"], dtype=torch.float) # dtype float required by BCEWithLogitsLoss
+        torch.tensor(_ds["label"], dtype=torch.float)
     )
 
 
@@ -67,23 +66,37 @@ def main(args):
     trainer = DiffNetwork(1, args.model_name)
     trainer.to(DEVICE)
 
+    trainer.fit(
+        train_loader,
+        eval_loader,
+        train_logger,
+        loss_fn,
+        metrics,
+        args.alpha_init,
+        args.concrete_lower,
+        args.concrete_upper,
+        args.structured_diff_pruning,
+        args.gradient_accumulation_steps,
+        args.num_epochs_finetune,
+        args.num_epochs_fixmask,
+        args.weight_decay,
+        args.learning_rate,
+        args.learning_rate_alpha,
+        args.adam_epsilon,
+        args.warmup_steps,
+        args.sparsity_pen,
+        args.max_grad_norm,
+        args.fixmask_pct,
+        args.output_dir
+    )
+
 
 if __name__ == "__main__":
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--debug", type=bool, default=False, help="Whether to run on small subset for testing")
-    parser.add_argument("--raw", type=bool, default=False, help="")
-    parser.add_argument("--baseline", type=bool, default=False, help="Whether to run diff training or normal finetuning")
-    base_args = parser.parse_args()
-    if base_args.baseline:
-        config_name = "train_config_baseline"
-    else:
-        config_name = "train_config"
-    
+        
     with open("cfg.yml", "r") as f:
         cfg = yaml.safe_load(f)    
     args = argparse.Namespace(**cfg["train_config"])
 
-    main(base_args, args)
+    main(args)
 
 

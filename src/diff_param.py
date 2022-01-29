@@ -1,17 +1,27 @@
-from functools import partial
 import torch
 from  torch import nn
 from torch.nn.parameter import Parameter
 import torch.nn.utils.parametrize as parametrize
 
-from typing import Callable
+from typing import Union
 
-from utils import concrete_stretched, concrete_stretched_deterministic
+from src.utils import concrete_stretched
 
 
 class DiffWeight(nn.Module):
-    
-    def __init__(self, weight, alpha_init, concrete_lower, concrete_upper, structured):
+    """
+    Implementation of diff pruning weights using pytorch parametrizations
+    https://pytorch.org/tutorials/intermediate/parametrizations.html
+    """
+
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        alpha_init: Union[float, int],
+        concrete_lower: Union[float, int],
+        concrete_upper: Union[float, int],
+        structured: bool
+    ):
         super().__init__()
         self.concrete_lower = concrete_lower
         self.concrete_upper = concrete_upper
@@ -23,11 +33,8 @@ class DiffWeight(nn.Module):
         
         if structured:
             self.register_parameter("alpha_group", Parameter(torch.zeros((1,), device=weight.device) + alpha_init))
-            
-        self.active = True
-                
+              
     def forward(self, X):
-        if not self.active: return X
         diff = (self.finetune - X).detach()
         return (self.finetune - diff) + self.z * (self.finetune - X)
     
@@ -46,10 +53,12 @@ class DiffWeight(nn.Module):
         return alpha
 
     def dist(self, x) -> torch.Tensor:
-        if self.training:
-            return concrete_stretched(x, l=self.concrete_lower, r=self.concrete_upper)
-        else:
-            return concrete_stretched_deterministic(x, l=self.concrete_lower, r=self.concrete_upper)
+        return concrete_stretched(
+            x,
+            l=self.concrete_lower,
+            r=self.concrete_upper,
+            deterministic=(not self.training)
+        )
             
     def set_mode(self, train: bool) -> None:
         if train:
