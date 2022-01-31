@@ -66,7 +66,8 @@ def main(args):
     eval_loader = DataLoader(ds_eval, sampler=SequentialSampler(ds_eval), batch_size=args.batch_size, collate_fn=batch_fn)
 
     logger_name = "_".join([
-        "diff_pruning",
+        "diff_pruning" if args.diff_pruning else "finetuning",
+        "fixmask" if args.num_epochs_fixmask > 0 else "no_fixmask",
         args.model_name.split('/')[-1],
         str(args.batch_size),
         str(args.learning_rate)
@@ -86,21 +87,22 @@ def main(args):
         train_logger,
         loss_fn,
         metrics,
+        args.num_epochs_finetune,
+        args.num_epochs_fixmask,
+        args.diff_pruning,
         args.alpha_init,
         args.concrete_lower,
         args.concrete_upper,
         args.structured_diff_pruning,
-        args.gradient_accumulation_steps,
-        args.num_epochs_finetune,
-        args.num_epochs_fixmask,
+        args.sparsity_pen,
+        args.fixmask_pct,
         args.weight_decay,
         args.learning_rate,
         args.learning_rate_alpha,
         args.adam_epsilon,
         args.warmup_steps,
-        args.sparsity_pen,
+        args.gradient_accumulation_steps,
         args.max_grad_norm,
-        args.fixmask_pct,
         args.output_dir
     )
 
