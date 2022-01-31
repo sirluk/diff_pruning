@@ -50,7 +50,7 @@ class TrainLogger:
     def non_zero_params(self, step, n_p, n_p_zero, n_p_between):
         d = {
             "zero_ratio": n_p_zero / n_p,
-            "0<z<1": n_p_between
+            "between_0_1_ratio": n_p_between / n_p
         }
         for k,v in d.items():
             self.writer.add_scalar(f"train/{k}", v, step)

@@ -77,4 +77,4 @@ class DiffWeightFixmask(nn.Module):
         self.register_parameter("mask", Parameter(mask, requires_grad=False))
     
     def forward(self, X):
-        return self.pre_trained + self.mask * X     
+        return self.pre_trained + self.mask * X    

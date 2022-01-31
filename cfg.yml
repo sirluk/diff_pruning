@@ -1,13 +1,14 @@
 train_config:
-    model_name: "google/bert_uncased_L-2_H-128_A-2" # "bert-base-cased"
-    batch_size: 32
+    model_name: "google/bert_uncased_L-2_H-128_A-2" # "bert-base-cased" # 
+    batch_size: 128
     structured_diff_pruning: True
     alpha_init: 5
     concrete_lower: -1.5
     concrete_upper: 1.5
     gradient_accumulation_steps: 1
-    num_epochs_finetune: 3
-    num_epochs_fixmask: 5
+    diff_pruning: True
+    num_epochs_finetune: 4
+    num_epochs_fixmask: 6
     weight_decay: 0.0
     learning_rate: 5e-5
     learning_rate_alpha: 0.1

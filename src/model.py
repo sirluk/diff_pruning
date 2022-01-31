@@ -98,21 +98,22 @@ class DiffNetwork(torch.nn.Module):
         logger: TrainLogger,
         loss_fn: Callable,
         metrics: Dict[str, Callable],
+        num_epochs_finetune: int,
+        num_epochs_fixmask: int,
+        diff_pruning: bool,
         alpha_init: Union[int, float],
         concrete_lower: float,
         concrete_upper: float,
         structured_diff_pruning: bool,
-        gradient_accumulation_steps: int,
-        num_epochs_finetune: int,
-        num_epochs_fixmask: int,
+        sparsity_pen: Union[float,list],
+        fixmask_pct: float,
         weight_decay: float,
         learning_rate: float,
         learning_rate_alpha: float,
         adam_epsilon: float,
         warmup_steps: int,
-        sparsity_pen: Union[float,list],
+        gradient_accumulation_steps: int,
         max_grad_norm: float,
-        fixmask_pct: float,
         output_dir: Union[str, os.PathLike]
     ) -> None:
         self.global_step = 0
@@ -120,14 +121,18 @@ class DiffNetwork(torch.nn.Module):
         num_epochs_total = num_epochs_finetune + num_epochs_fixmask
         train_steps_finetune = len(train_loader) // gradient_accumulation_steps * num_epochs_finetune
         train_steps_fixmask = len(train_loader) // gradient_accumulation_steps * num_epochs_fixmask
+        
         log_ratio = self.get_log_ratio(concrete_lower, concrete_upper)
         
-        self._add_diff_parametrizations(
-            alpha_init,
-            concrete_lower,
-            concrete_upper,
-            structured_diff_pruning  
-        )
+        if diff_pruning:
+            self._init_sparsity_pen(sparsity_pen)
+            self._add_diff_parametrizations(
+                alpha_init,
+                concrete_lower,
+                concrete_upper,
+                structured_diff_pruning  
+            )       
+        
         
         self._init_optimizer_and_schedule(
             train_steps_finetune,
@@ -137,9 +142,7 @@ class DiffNetwork(torch.nn.Module):
             warmup_steps,
             learning_rate_alpha,
         )
-        
-        self._init_sparsity_pen(sparsity_pen)
-        
+           
         train_str = "Epoch {}, model_state: {}{}"
         str_suffix = lambda result: ", " + ", ".join([f"validation {k}: {v}" for k,v in result.items()])
         result = {}
@@ -182,17 +185,17 @@ class DiffNetwork(torch.nn.Module):
             # if num_epochs_fixmask > 0 only save during fixmask tuning
             if ((num_epochs_fixmask > 0) and (self._model_state==ModelState.FIXMASK)) or (num_epochs_fixmask == 0):
                 if logger.is_best(result):
-                    self._save_model_artefacts(
-                        output_dir,
-                        f"checkpoint-best-info.pt",
-                        result["loss"],
-                        epoch,
-                        num_epochs_finetune
+                    self.save_checkpoint(
+                        Path(output_dir) / "checkpoint-best-info.pt",
+                        concrete_lower,
+                        concrete_upper,
+                        structured_diff_pruning
                     )
                     
             # count non zero
-            n_p, n_p_zero, n_p_between = self._count_non_zero_params()            
-            logger.non_zero_params(epoch, n_p, n_p_zero, n_p_between)
+            if diff_pruning:
+                n_p, n_p_zero, n_p_between = self._count_non_zero_params()            
+                logger.non_zero_params(epoch, n_p, n_p_zero, n_p_between)
         
         print("Final results after " + train_str.format(epoch, self._model_state, str_suffix(result)))
 
@@ -418,29 +421,50 @@ class DiffNetwork(torch.nn.Module):
             for n,p in list(base_module.named_parameters()):
                 parametrize.register_parametrization(base_module, n, DiffWeight(p, *args))   
         self._model_state = ModelState.DIFFPRUNING
-        
-      
+          
+
     @torch.no_grad()
     def _finetune_to_fixmask(self, pct: float) -> None:
-        diff_values = torch.tensor([])
-        for base_module in self.get_encoder_base_modules():
-            for n, par_list in list(base_module.parametrizations.items()):
-                par_list[0].set_mode(train=False)
-                diff_val = (getattr(base_module, n) - par_list.original).detach().cpu()
-                diff_values = torch.cat([diff_values, diff_val.flatten()])
-                
-        k = int(len(diff_values) * pct)
-        cutoff = torch.topk(torch.abs(diff_values), k, largest=True, sorted=True)[0][-1]
-                
-        for base_module in self.get_encoder_base_modules():
-            for n, par_list in list(base_module.parametrizations.items()):
-                pre_trained = torch.clone(par_list.original)
-                parametrize.remove_parametrizations(base_module, n)
-                p = base_module._parameters[n].detach()
-                diff_weight = (p - pre_trained)
+        
+        def _get_cutoff(values, pct):
+            k = int(len(values) * pct)
+            return torch.topk(torch.abs(values), k, largest=True, sorted=True)[0][-1]            
+        
+        if self._model_state == ModelState.DIFFPRUNING:  
+            diff_weights = torch.tensor([])
+            for base_module in self.get_encoder_base_modules():
+                for n, par_list in list(base_module.parametrizations.items()):
+                    par_list[0].set_mode(train=False)
+                    diff_weight = (getattr(base_module, n) - par_list.original).detach().cpu()
+                    diff_weights = torch.cat([diff_weights, diff_weight.flatten()])
+            cutoff = _get_cutoff(diff_weights, pct)
+            for base_module in self.get_encoder_base_modules():
+                for n, par_list in list(base_module.parametrizations.items()):
+                    pre_trained_weight = torch.clone(par_list.original)
+                    parametrize.remove_parametrizations(base_module, n)
+                    p = base_module._parameters[n].detach()
+                    diff_weight = (p - pre_trained_weight)
+                    diff_mask = (torch.abs(diff_weight) >= cutoff)
+                    base_module._parameters[n] = Parameter(diff_weight * diff_mask)
+                    parametrize.register_parametrization(base_module, n, DiffWeightFixmask(pre_trained_weight, diff_mask))
+        
+        elif self._model_state == ModelState.FINETUNING:     
+            diff_weights = torch.tensor([])
+            pre_trained = AutoModel.from_config(self.encoder.config)
+            for p, p_pre in zip(self.encoder.parameters(), pre_trained.parameters()):
+                diff_weight = (p.cpu() - p_pre).flatten().detach()
+                diff_weights = torch.cat([diff_weights, diff_weight])
+            cutoff = _get_cutoff(diff_weights, pct)
+            base_modules = dict(self.get_encoder_base_modules(return_names=True))
+            for (n, p), p_pre in zip(list(self.encoder.named_parameters()), pre_trained.parameters()):
+                n_parts = n.split(".")
+                module_name, p_name = ".".join(n_parts[:-1]), n_parts[-1]
+                base_module = base_modules[module_name]
+                diff_weight = (p - p_pre.to(self.device))
                 diff_mask = (torch.abs(diff_weight) >= cutoff)
                 base_module._parameters[n] = Parameter(diff_weight * diff_mask)
-                parametrize.register_parametrization(base_module, n, DiffWeightFixmask(pre_trained, diff_mask))
+                parametrize.register_parametrization(base_module, p_name, DiffWeightFixmask(p_pre.to(self.device), diff_mask))         
+                
         self._model_state = ModelState.FIXMASK
                                         
     
@@ -454,7 +478,7 @@ class DiffNetwork(torch.nn.Module):
             for par_list in list(base_module.parametrizations.values()):
                 if isinstance(par_list[0], DiffWeightFixmask):
                     n_p_ = par_list[0].mask.numel()
-                    n_p_zero_ = ~par_list[0].mask.sum()
+                    n_p_zero_ = (~par_list[0].mask).sum()
                     n_p += n_p_
                     n_p_zero += n_p_zero_
                     n_p_one += (n_p_ - n_p_zero_)

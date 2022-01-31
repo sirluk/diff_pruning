@@ -1,3 +1,4 @@
+from functools import reduce
 import torch
 
 from typing import Union
@@ -21,3 +22,9 @@ def concrete_stretched(
 
 def dict_to_device(d: dict, device: Union[str, torch.device]) -> dict:
     return {k:v.to(device) for k,v in d.items()}
+
+
+def get_module_by_name(main_module: torch.nn.Module, module_ref: Union[str, list]) -> torch.nn.Module:
+    if isinstance(module_ref, str):
+        module_ref = module_ref.split(sep='.')
+    return reduce(getattr, module_ref, main_module)
