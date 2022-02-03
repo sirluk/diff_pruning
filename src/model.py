@@ -218,7 +218,7 @@ class DiffNetwork(torch.nn.Module):
             logits = self(**inputs)
             output_list.append((
                 logits.cpu(),
-                labels.cpu()
+                labels
             ))
                     
         p, l = list(zip(*output_list))
@@ -301,9 +301,10 @@ class DiffNetwork(torch.nn.Module):
                     ))          
     
         diff_network.encoder.load_state_dict(info_dict['encoder_state_dict'])
+        diff_network._model_state = info_dict["model_state"]
         
         if remove_parametrizations:
-            diff_network._remove_diff_parametrizations()
+            diff_network._remove_diff_parametrizations()           
         
         diff_network.eval()
         
@@ -494,7 +495,7 @@ class DiffNetwork(torch.nn.Module):
 
     
     def _remove_diff_parametrizations(self) -> None:
-        for parametrized_module in self.get_encoder_base_modules():
-            for n in list(parametrized_module.parametrizations):
-                parametrize.remove_parametrizations(parametrized_module, n)
+        for module in self.get_encoder_base_modules():
+            for n in list(module.parametrizations):
+                parametrize.remove_parametrizations(module, n)
         self._model_state = ModelState.FINETUNING

@@ -22,9 +22,7 @@ class TrainLogger:
         self.writer = SummaryWriter(log_dir / logger_name)
 
         self.logging_step = logging_step
-        self.steps = 0
-        self.logging_loss = 0.
-        self.best_eval_loss = math.inf
+        self.reset()
 
     def validation_loss(self, eval_step: int, result: dict): 
         for name, value in sorted(result.items(), key=lambda x: x[0]):
@@ -36,7 +34,6 @@ class TrainLogger:
         self.steps += 1
         
         if step % self.logging_step == 0:
- 
             logs = {
                 "step_learning_rate": lr,
                 "step_loss": self.logging_loss / self.steps
@@ -61,6 +58,9 @@ class TrainLogger:
             self.best_eval_loss = result["loss"]
             return True
         
-
+    def reset(self):
+        self.steps = 0
+        self.logging_loss = 0.
+        self.best_eval_loss = math.inf   
             
 
