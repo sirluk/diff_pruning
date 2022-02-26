@@ -179,23 +179,23 @@ class DiffNetwork(torch.nn.Module):
                 loss_fn,
                 metrics
             )
-            
+
             logger.validation_loss(epoch, result)
+            
+            # count non zero
+            if diff_pruning:
+                n_p, n_p_zero, n_p_between = self._count_non_zero_params()            
+                logger.non_zero_params(epoch, n_p, n_p_zero, n_p_between)
             
             # if num_epochs_fixmask > 0 only save during fixmask tuning
             if ((num_epochs_fixmask > 0) and (self._model_state==ModelState.FIXMASK)) or (num_epochs_fixmask == 0):
                 if logger.is_best(result):
                     self.save_checkpoint(
-                        Path(output_dir) / "checkpoint-best-info.pt",
+                        Path(output_dir),
                         concrete_lower,
                         concrete_upper,
                         structured_diff_pruning
                     )
-                    
-            # count non zero
-            if diff_pruning:
-                n_p, n_p_zero, n_p_between = self._count_non_zero_params()            
-                logger.non_zero_params(epoch, n_p, n_p_zero, n_p_between)
         
         print("Final results after " + train_str.format(epoch, self._model_state, str_suffix(result)))
 
@@ -252,7 +252,7 @@ class DiffNetwork(torch.nn.Module):
                     
     def save_checkpoint(
         self,
-        filepath: Union[str, os.PathLike],
+        output_dir: Union[str, os.PathLike],
         concrete_lower: Optional[float] = None,
         concrete_upper: Optional[float] = None,
         structured_diff_pruning: Optional[bool] = None
@@ -271,7 +271,10 @@ class DiffNetwork(torch.nn.Module):
                 "concrete_upper": concrete_upper,
                 "structured_diff_pruning": structured_diff_pruning
             } 
+        filename = f"checkpoint-{self.model_name.split('/')[-1]}.pt"
+        filepath = Path(output_dir) / filename
         torch.save(info_dict, filepath)
+        return filepath
 
 
     @staticmethod
@@ -435,7 +438,7 @@ class DiffNetwork(torch.nn.Module):
             diff_weights = torch.tensor([])
             for base_module in self.get_encoder_base_modules():
                 for n, par_list in list(base_module.parametrizations.items()):
-                    par_list[0].set_mode(train=False)
+                    par_list[0].eval()
                     diff_weight = (getattr(base_module, n) - par_list.original).detach().cpu()
                     diff_weights = torch.cat([diff_weights, diff_weight.flatten()])
             cutoff = _get_cutoff(diff_weights, pct)
@@ -472,6 +475,7 @@ class DiffNetwork(torch.nn.Module):
     @torch.no_grad() 
     def _count_non_zero_params(self) -> Tuple[int, int]:
         assert self._parametrized, "Function only implemented for diff pruning"
+        self.eval()
         n_p = 0
         n_p_zero = 0
         n_p_one = 0
@@ -484,12 +488,11 @@ class DiffNetwork(torch.nn.Module):
                     n_p_zero += n_p_zero_
                     n_p_one += (n_p_ - n_p_zero_)
                 else:
-                    par_list[0].set_mode(train=False)
                     z = par_list[0].z.detach()
                     n_p += z.numel()
                     n_p_zero += (z == 0.).sum()
                     n_p_one += (z == 1.).sum()
-                    par_list[0].set_mode(train=True)
+        self.train()
         n_p_between = n_p - (n_p_zero + n_p_one)
         return n_p, n_p_zero, n_p_between
 

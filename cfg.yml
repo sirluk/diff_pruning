@@ -7,8 +7,8 @@ train_config:
     concrete_upper: 1.5
     gradient_accumulation_steps: 1
     diff_pruning: True
-    num_epochs_finetune: 4
-    num_epochs_fixmask: 6
+    num_epochs_finetune: 1
+    num_epochs_fixmask: 1
     weight_decay: 0.0
     learning_rate: 5e-5
     learning_rate_alpha: 0.1
@@ -16,7 +16,7 @@ train_config:
     warmup_steps: 0
     sparsity_pen: 1.25e-7
     max_grad_norm: 1.0
-    fixmask_pct: 0.1
+    fixmask_pct: 0.01
     logging_step: 5
     output_dir: "checkpoints"
     log_dir: "logs"

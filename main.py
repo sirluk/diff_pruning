@@ -14,7 +14,7 @@ from src.metrics import accuracy
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
+DATASET = "glue_sentiment"
 
 def get_ds(tokenizer) -> TensorDataset:
     
@@ -69,6 +69,7 @@ def main(args):
         "diff_pruning" if args.diff_pruning else "finetuning",
         "fixmask" if args.num_epochs_fixmask > 0 else "no_fixmask",
         args.model_name.split('/')[-1],
+        DATASET,
         str(args.batch_size),
         str(args.learning_rate)
     ])

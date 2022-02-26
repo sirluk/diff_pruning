@@ -60,14 +60,6 @@ class DiffWeight(nn.Module):
             deterministic=(not self.training)
         )
             
-    def set_mode(self, train: bool) -> None:
-        if train:
-            self.train()
-        else:
-            self.eval()
-        for p in self.parameters():
-            p.requires_grad = train
-            
             
 class DiffWeightFixmask(nn.Module):
     

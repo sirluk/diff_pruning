@@ -20,7 +20,7 @@ class TrainLogger:
         log_dir.mkdir(exist_ok=True, parents=True)
         
         self.writer = SummaryWriter(log_dir / logger_name)
-
+        self.logger_name = logger_name
         self.logging_step = logging_step
         self.reset()
 
