@@ -54,7 +54,7 @@ def main(args):
     
     ds = get_ds(tokenizer)
     
-    pred_fn = lambda x: (torch.sigmoid(x) > .5).long()
+    pred_fn = lambda x: (x > 0.).long()
     loss_fn = lambda x, y: torch.nn.BCEWithLogitsLoss()(x.flatten(), y)
     metrics = {
         "acc": lambda x, y: accuracy(pred_fn(x), y)
